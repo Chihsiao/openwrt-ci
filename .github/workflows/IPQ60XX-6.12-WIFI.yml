@@ -1,0 +1,130 @@
+name: IPQ60XX-6.12-WIFI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+  CONFIG_FILE: configs/ipq60xx-6.12-wifi.config
+  REPO_URL: https://github.com/Chihsiao/openwrt-6.x.git
+  REPO_BRANCH: main-nss
+
+jobs:
+  Build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Print server info
+        run: |
+          grep 'model name' /proc/cpuinfo | cut -f2 -d: | uniq -c
+          free -h
+          df -hT
+
+      - name: Remove snap completely
+        uses: ading2210/gh-actions-remove-snap@v1.0.0
+
+      - name: Initialize build environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 1024
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone
+        run: |
+          git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
+
+      - name: Prepare variables
+        run: |
+          cd openwrt
+          cp -a "../$CONFIG_FILE" .config
+          trap 'rm -rf .config' EXIT
+          make defconfig
+
+          extract_from_config() {
+            grep '^'"$1"'\b' .config \
+              | awk -F '"' '{print $2}'
+          }
+
+          echo "SOURCE_REPO=$(basename "$REPO_URL" .git)" >> "$GITHUB_ENV"
+          echo "DEVICE_TARGET=$(extract_from_config CONFIG_TARGET_BOARD)" >> "$GITHUB_ENV"
+          echo "DEVICE_SUBTARGET=$(extract_from_config CONFIG_TARGET_SUBTARGET)" >> "$GITHUB_ENV"
+
+      - name: Cache toolchain
+        uses: HiGarfield/cachewrtbuild@main
+        with:
+          ccache: false
+          prefix: openwrt
+          mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+
+      - name: Configure
+        env:
+          APK_SIGNING_PRIVATE_KEY: ${{ secrets.APK_SIGNING_PRIVATE_KEY }}
+          APK_SIGNING_PUBLIC_KEY: |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEol5kd9JbWeBa9QTkficNOBy3WRNB
+            3NEYpjwChpl6ctfj5NZ9gMVov3GOOxdWEDyMQLZxKsirDIWY2XMcR3HVJQ==
+            -----END PUBLIC KEY-----
+        run: |
+          cd openwrt
+
+          echo "$APK_SIGNING_PUBLIC_KEY" > public-key.pem
+          echo "$APK_SIGNING_PRIVATE_KEY" > private-key.pem
+
+          ./scripts/feeds update -a && ./scripts/feeds install -a
+
+          cp -a "../$CONFIG_FILE" .config
+          [ ! -d ../files ] || mv ../files files
+          if [ -n "${CUSTOMIZE_SCRIPT:-}" ]; then
+            chmod +x "../$CUSTOMIZE_SCRIPT"
+            "../$CUSTOMIZE_SCRIPT"
+          fi
+
+          make defconfig
+          cat .config
+
+      - name: Download deps
+        run: |
+          cd openwrt
+          make download -j"$(nproc)"
+
+      - name: Compile firmware
+        id: compile
+        run: |
+          cd openwrt
+          echo "$(nproc) thread compile"
+          make -j"$(nproc)" || make -j1 || make -j1 V=s
+          echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Print space usage
+        if: (!cancelled())
+        run: df -hT
+
+      - name: Upload bin as artifact
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@main
+        with:
+          path: openwrt/bin
+          name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
+
+      - name: Deploy bin to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}

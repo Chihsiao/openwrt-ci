@@ -1,0 +1,6 @@
+compatibility_date = "2026-06-14"
+name = "openwrt-release"
+
+[assets]
+directory = "openwrt/bin"
+not_found_handling = "404-page"
