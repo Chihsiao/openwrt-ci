@@ -14,6 +14,7 @@ env:
   CONFIG_FILE: configs/ipq60xx-6.12-wifi.config
   REPO_URL: https://github.com/Chihsiao/openwrt-6.x.git
   REPO_BRANCH: main-nss
+  CCACHE_MAXSIZE: 5G
 
 jobs:
   Build:
@@ -68,7 +69,7 @@ jobs:
       - name: Cache toolchain
         uses: HiGarfield/cachewrtbuild@main
         with:
-          ccache: false
+          ccache: true
           prefix: openwrt
           mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
 
@@ -114,7 +115,10 @@ jobs:
 
       - name: Print space usage
         if: (!cancelled())
-        run: df -hT
+        run: |
+          cd openwrt
+          du -hs *
+          df -hT
 
       - name: Upload bin as artifact
         if: steps.compile.outputs.status == 'success'
